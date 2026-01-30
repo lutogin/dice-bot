@@ -4,6 +4,7 @@ import { ConfigService } from '../../config';
 import { Logger, ILogger } from '../../infra/logger/logger';
 import { EventBus } from '../../infra/event-bus/event-bus';
 import { BinanceClient } from '../../integrations/exchanges/binance/binance';
+import { FeatureBuilder } from '../features/features.service';
 import { TradePlan, TradeSide } from '../setup-engine/setup-engine.types';
 import {
   setupEventHandlers,
@@ -33,7 +34,18 @@ interface ActivePosition {
   // Trailing stop
   trailActivated: boolean;
   trailStopPrice: number;
+  // Time-based exits
+  lastMfeCheckTime: number;
+  mfeAtLastCheck: number;
 }
+
+// Time-stop and no-follow-through config
+const TIME_STOP_CONFIG = {
+  MAX_HOLD_WITHOUT_PROGRESS_MS: 5 * 60 * 1000, // 5 min max without progress
+  MIN_MFE_FOR_PROGRESS: 0.2, // Need at least 0.2R MFE to consider "progress"
+  NO_FOLLOW_THROUGH_MS: 60 * 1000, // 60 sec to show follow-through after entry
+  NO_FOLLOW_THROUGH_MIN_MFE: 0.15, // Need 0.15R within first 60 sec
+};
 
 @injectable()
 export class ExecutionEngine {
@@ -57,6 +69,7 @@ export class ExecutionEngine {
     @inject(TOKENS.LOGGER) logger: Logger,
     @inject(TOKENS.EVENT_BUS) private eventBus: EventBus,
     @inject(TOKENS.BINANCE_CLIENT) private binance: BinanceClient,
+    @inject(TOKENS.FEATURE_BUILDER) private featureBuilder: FeatureBuilder,
   ) {
     this.logger = logger.child('ExecutionEngine');
     setupEventHandlers(this);
@@ -101,6 +114,21 @@ export class ExecutionEngine {
         position.lowestPrice = tick.price;
       }
 
+      // Calculate current MFE in R
+      const riskPerUnit = Math.abs(
+        position.entryPrice - position.originalStopPrice,
+      );
+      const currentMfeR = this.calculateCurrentMfeR(
+        position,
+        tick.price,
+        riskPerUnit,
+      );
+
+      // Check time-based exits (only if TP1 not hit yet)
+      if (!position.tp1Hit) {
+        this.checkTimeBasedExits(position, tick.price, currentMfeR);
+      }
+
       // In simulation mode, check SL/TP hits
       if (this.config.isSimulation()) {
         this.checkSimulatedExits(position, tick.price);
@@ -109,6 +137,90 @@ export class ExecutionEngine {
       // Check trailing stop if TP1 was hit
       if (position.tp1Hit) {
         this.checkTrailingStop(position, tick.price);
+      }
+    }
+  }
+
+  /**
+   * Calculate current MFE in R multiples
+   */
+  private calculateCurrentMfeR(
+    position: ActivePosition,
+    currentPrice: number,
+    riskPerUnit: number,
+  ): number {
+    if (riskPerUnit === 0) return 0;
+
+    if (position.side === 'LONG') {
+      return (position.highestPrice - position.entryPrice) / riskPerUnit;
+    } else {
+      return (position.entryPrice - position.lowestPrice) / riskPerUnit;
+    }
+  }
+
+  /**
+   * Check time-based exit conditions
+   */
+  private async checkTimeBasedExits(
+    position: ActivePosition,
+    currentPrice: number,
+    currentMfeR: number,
+  ): Promise<void> {
+    const now = Date.now();
+    const holdTimeMs = now - position.openedAt;
+    const riskPerUnit = Math.abs(
+      position.entryPrice - position.originalStopPrice,
+    );
+
+    // 1. No follow-through check (first 60 seconds)
+    if (holdTimeMs <= TIME_STOP_CONFIG.NO_FOLLOW_THROUGH_MS) {
+      // Still in follow-through window, just track
+      return;
+    }
+
+    // After follow-through window: check if we ever got enough MFE
+    if (
+      holdTimeMs > TIME_STOP_CONFIG.NO_FOLLOW_THROUGH_MS &&
+      holdTimeMs < TIME_STOP_CONFIG.NO_FOLLOW_THROUGH_MS + 5000
+    ) {
+      // Check once around 60-65 sec mark
+
+      if (currentMfeR < TIME_STOP_CONFIG.NO_FOLLOW_THROUGH_MIN_MFE) {
+        this.logger.info('⏱️ No follow-through - scratching position', {
+          planId: position.planId,
+          holdTimeSec: (holdTimeMs / 1000).toFixed(1),
+          mfeR: currentMfeR.toFixed(2),
+          requiredMfeR: TIME_STOP_CONFIG.NO_FOLLOW_THROUGH_MIN_MFE,
+        });
+
+        await this.closePosition(position.planId, 'TIME_STOP');
+        return;
+      }
+    }
+
+    // 2. Time stop: position dying in the water
+    if (holdTimeMs > TIME_STOP_CONFIG.MAX_HOLD_WITHOUT_PROGRESS_MS) {
+      // Check if we've made meaningful progress
+      if (currentMfeR < TIME_STOP_CONFIG.MIN_MFE_FOR_PROGRESS) {
+        // Calculate current P&L
+        const currentPnlR =
+          position.side === 'LONG'
+            ? (currentPrice - position.entryPrice) / riskPerUnit
+            : (position.entryPrice - currentPrice) / riskPerUnit;
+
+        // Only scratch if we're near breakeven or small loss
+        if (currentPnlR > -0.3) {
+          // Within -0.3R
+          this.logger.info('⏱️ Time stop - no progress, scratching', {
+            planId: position.planId,
+            holdTimeSec: (holdTimeMs / 1000).toFixed(1),
+            mfeR: currentMfeR.toFixed(2),
+            currentPnlR: currentPnlR.toFixed(2),
+          });
+
+          await this.closePosition(position.planId, 'TIME_STOP');
+          return;
+        }
       }
     }
   }
@@ -172,6 +284,38 @@ export class ExecutionEngine {
     } else {
       return position.entryPrice - tp1Distance;
     }
+  }
+
+  /**
+   * Calculate realistic slippage based on market conditions
+   * Slippage = a*spread + b*rv + c*(notional/depth) + noise
+   */
+  private calculateRealisticSlippage(plan: TradePlan): number {
+    const features = this.featureBuilder.getFeatures(plan.symbol);
+
+    // Base slippage components
+    let slippage = 0;
+
+    // 1. Spread component (50% of half-spread)
+    const spreadComponent = features ? features.spreadPct * 0.5 : 0.0002;
+    slippage += spreadComponent;
+
+    // 2. Volatility component (higher vol = more slippage)
+    const rvComponent = features ? features.rv30s * 0.3 : 0.0001;
+    slippage += rvComponent;
+
+    // 3. Impact component (larger orders = more slippage)
+    // Simplified: assume $50k depth on each side
+    const assumedDepth = 50000;
+    const impactComponent = (plan.notionalUsdc / assumedDepth) * 0.001;
+    slippage += Math.min(impactComponent, 0.002); // Cap at 0.2%
+
+    // 4. Random noise (±20% of calculated slippage)
+    const noise = (Math.random() - 0.5) * 0.4 * slippage;
+    slippage += noise;
+
+    // Clamp to reasonable bounds [0.01%, 0.5%]
+    return Math.max(0.0001, Math.min(0.005, slippage));
   }
 
   @EventHandler('trade-plan.created')
@@ -268,11 +412,19 @@ export class ExecutionEngine {
       let tp1OrderId: string;
 
       if (this.config.isSimulation()) {
-        // SIMULATION MODE - paper trading
-        entryPrice =
-          plan.entryTriggerPrice * (1 + (Math.random() - 0.5) * 0.001); // Small random slippage
+        // SIMULATION MODE - paper trading with realistic slippage model
+        // Slippage = f(spread, volatility, impact)
+        const simulatedSlippage = this.calculateRealisticSlippage(plan);
+
+        // Apply slippage in direction of entry
+        if (plan.side === 'LONG') {
+          entryPrice = plan.entryTriggerPrice * (1 + simulatedSlippage);
+        } else {
+          entryPrice = plan.entryTriggerPrice * (1 - simulatedSlippage);
+        }
+
         filledQty = plan.qty;
-        entryFees = entryPrice * filledQty * 0.0004; // Simulate 0.04% fee
+        entryFees = entryPrice * filledQty * 0.0004; // Simulate 0.04% taker fee
         stopOrderId = `SIM-SL-${Date.now()}`;
         tp1OrderId = `SIM-TP1-${Date.now()}`;
 
@@ -280,7 +432,9 @@ export class ExecutionEngine {
           planId: plan.id,
           symbol: plan.symbol,
           side: plan.side,
+          triggerPrice: plan.entryTriggerPrice.toFixed(2),
           fillPrice: entryPrice.toFixed(2),
+          slippageBps: (simulatedSlippage * 10000).toFixed(1),
           qty: filledQty.toFixed(4),
         });
       } else {
@@ -352,6 +506,7 @@ export class ExecutionEngine {
       );
 
       // Create active position with MAE/MFE tracking
+      const now = Date.now();
       const position: ActivePosition = {
         planId: plan.id,
         symbol: plan.symbol,
@@ -364,13 +519,16 @@ export class ExecutionEngine {
         originalStopPrice: plan.stopPrice,
         stopOrderId,
         tp1OrderId,
-        openedAt: Date.now(),
+        openedAt: now,
         tp1Hit: false,
         highestPrice: entryPrice,
         lowestPrice: entryPrice,
         totalFees: entryFees,
         trailActivated: false,
         trailStopPrice: plan.stopPrice,
+        // Time-based exit tracking
+        lastMfeCheckTime: now,
+        mfeAtLastCheck: 0,
       };
 
       this.positions.set(plan.id, position);
@@ -589,7 +747,7 @@ export class ExecutionEngine {
 
   async closePosition(
     planId: string,
-    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH',
+    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH' | 'TIME_STOP',
   ): Promise<void> {
     const position = this.positions.get(planId);
     if (!position) {

@@ -85,6 +85,18 @@ export interface FFEConfig {
     maxStallRangePct: number; // Price must be stalling
     cooldownSec: number;
   };
+
+  // Data Integrity Guard
+  dataIntegrity: {
+    maxTickGapMs: number; // Max time without tick before stale
+    maxBookGapMs: number; // Max time without book update before stale
+    maxOiAgeMs: number; // Max OI data age
+    maxSpreadPct: number; // Max spread before unhealthy
+    minTopDepthUsd: number; // Min depth on each side
+    minTrades10s: number; // Min trades per 10s
+    maxReconnects5min: number; // Max WS reconnects per 5 min
+    startupGracePeriodMs: number; // Grace period on startup
+  };
 }
 
 const configSchema = Joi.object({
@@ -161,6 +173,17 @@ const configSchema = Joi.object({
     maxStallRangePct: Joi.number().default(0.002), // 0.2% price range
     cooldownSec: Joi.number().default(300), // 5 min cooldown
   }),
+
+  dataIntegrity: Joi.object({
+    maxTickGapMs: Joi.number().default(5000), // 5 sec
+    maxBookGapMs: Joi.number().default(3000), // 3 sec
+    maxOiAgeMs: Joi.number().default(300000), // 5 min
+    maxSpreadPct: Joi.number().default(0.003), // 0.3%
+    minTopDepthUsd: Joi.number().default(10000), // $10k
+    minTrades10s: Joi.number().default(5), // 5 trades
+    maxReconnects5min: Joi.number().default(3), // 3 reconnects
+    startupGracePeriodMs: Joi.number().default(30000), // 30 sec
+  }),
 });
 
 @injectable()
@@ -179,6 +202,7 @@ export class ConfigService implements FFEConfig {
   readonly exits: FFEConfig['exits'];
   readonly features: FFEConfig['features'];
   readonly crowding: FFEConfig['crowding'];
+  readonly dataIntegrity: FFEConfig['dataIntegrity'];
 
   constructor() {
     const rawConfig = {
@@ -295,6 +319,36 @@ export class ConfigService implements FFEConfig {
           10,
         ),
       },
+
+      dataIntegrity: {
+        maxTickGapMs: parseInt(
+          process.env['FFE_DI_MAX_TICK_GAP_MS'] || '5000',
+          10,
+        ),
+        maxBookGapMs: parseInt(
+          process.env['FFE_DI_MAX_BOOK_GAP_MS'] || '3000',
+          10,
+        ),
+        maxOiAgeMs: parseInt(
+          process.env['FFE_DI_MAX_OI_AGE_MS'] || '300000',
+          10,
+        ),
+        maxSpreadPct: parseFloat(
+          process.env['FFE_DI_MAX_SPREAD_PCT'] || '0.003',
+        ),
+        minTopDepthUsd: parseFloat(
+          process.env['FFE_DI_MIN_TOP_DEPTH_USD'] || '10000',
+        ),
+        minTrades10s: parseInt(process.env['FFE_DI_MIN_TRADES_10S'] || '5', 10),
+        maxReconnects5min: parseInt(
+          process.env['FFE_DI_MAX_RECONNECTS_5MIN'] || '3',
+          10,
+        ),
+        startupGracePeriodMs: parseInt(
+          process.env['FFE_DI_STARTUP_GRACE_MS'] || '30000',
+          10,
+        ),
+      },
     };
 
     const { error, value } = configSchema.validate(rawConfig, {
@@ -326,6 +380,7 @@ export class ConfigService implements FFEConfig {
     this.exits = value.exits;
     this.features = value.features;
     this.crowding = value.crowding;
+    this.dataIntegrity = value.dataIntegrity;
   }
 
   isProduction(): boolean {

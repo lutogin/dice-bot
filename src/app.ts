@@ -18,6 +18,7 @@ import { TelegramService } from './integrations/telegram/telegram.service';
 // Domain Services
 import { MarketDataService } from './domain/market-data/market-data.service';
 import { FeatureBuilder } from './domain/features/features.service';
+import { DataIntegrityGuard } from './domain/data-integrity/data-integrity.service';
 import { LiqBurstDetector } from './domain/detectors/liq-burst.detector';
 import { CrowdingDetector } from './domain/detectors/crowding.detector';
 import { SignalClassifier } from './domain/classifier/classifier.service';
@@ -46,6 +47,8 @@ export class App {
     // Domain Services
     @inject(TOKENS.MARKET_DATA_SERVICE) private marketData: MarketDataService,
     @inject(TOKENS.FEATURE_BUILDER) private featureBuilder: FeatureBuilder,
+    @inject(TOKENS.DATA_INTEGRITY_GUARD)
+    private dataIntegrity: DataIntegrityGuard,
     @inject(TOKENS.LIQ_BURST_DETECTOR)
     private liqBurstDetector: LiqBurstDetector,
     @inject(TOKENS.CROWDING_DETECTOR)
@@ -110,6 +113,9 @@ export class App {
       await this.featureBuilder.start();
       this.logger.info('✓ FeatureBuilder started');
 
+      await this.dataIntegrity.start();
+      this.logger.info('✓ DataIntegrityGuard started');
+
       await this.setupEngine.start();
       this.logger.info('✓ SetupEngine started');
 
@@ -154,6 +160,7 @@ export class App {
       // Stop domain services
       await this.executionEngine.stop();
       await this.setupEngine.stop();
+      await this.dataIntegrity.stop();
       await this.marketData.stop();
 
       // Stop infrastructure

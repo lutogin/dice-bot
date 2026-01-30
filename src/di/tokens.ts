@@ -26,6 +26,9 @@ export const TOKENS = {
   // Features
   FEATURE_BUILDER: Symbol.for('FeatureBuilder'),
 
+  // Data Integrity
+  DATA_INTEGRITY_GUARD: Symbol.for('DataIntegrityGuard'),
+
   // Detectors
   LIQ_BURST_DETECTOR: Symbol.for('LiqBurstDetector'),
   CROWDING_DETECTOR: Symbol.for('CrowdingDetector'),

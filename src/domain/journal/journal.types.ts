@@ -32,7 +32,7 @@ export interface TradeRecord {
   closedAt: number;
 
   // Context
-  exitReason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH';
+  exitReason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH' | 'TIME_STOP';
   result: TradeResult;
 }
 

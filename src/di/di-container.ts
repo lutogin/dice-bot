@@ -26,6 +26,9 @@ import { MarketDataService } from '../domain/market-data/market-data.service';
 // Domain - Features
 import { FeatureBuilder } from '../domain/features/features.service';
 
+// Domain - Data Integrity
+import { DataIntegrityGuard } from '../domain/data-integrity/data-integrity.service';
+
 // Domain - Detectors
 import { LiqBurstDetector } from '../domain/detectors/liq-burst.detector';
 import { CrowdingDetector } from '../domain/detectors/crowding.detector';
@@ -87,6 +90,12 @@ export class DIContainer {
 
     // ==================== Domain - Features ====================
     container.registerSingleton(TOKENS.FEATURE_BUILDER, FeatureBuilder);
+
+    // ==================== Domain - Data Integrity ====================
+    container.registerSingleton(
+      TOKENS.DATA_INTEGRITY_GUARD,
+      DataIntegrityGuard,
+    );
 
     // ==================== Domain - Detectors ====================
     container.registerSingleton(TOKENS.LIQ_BURST_DETECTOR, LiqBurstDetector);

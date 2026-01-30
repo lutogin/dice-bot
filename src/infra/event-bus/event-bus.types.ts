@@ -39,6 +39,34 @@ export interface EventMap {
     reason: string;
   };
 
+  // ==================== Setup Engine ====================
+  'setup.expired': {
+    eventId: string;
+    symbol: string;
+    reason: string;
+    waitedSec: number;
+    lastRejectReasons: string[];
+  };
+
+  'setup.aborted': {
+    eventId: string;
+    symbol: string;
+    reason: string;
+    continuationReasons: string[];
+    waitedSec: number;
+  };
+
+  // ==================== Data Integrity ====================
+  'data-integrity.unhealthy': {
+    symbol: string;
+    reasons: string[];
+    timestamp: number;
+  };
+
+  'data-integrity.restored': {
+    timestamp: number;
+  };
+
   // ==================== Execution ====================
   'order.placed': {
     planId: string;
@@ -86,7 +114,7 @@ export interface EventMap {
     qty: number;
     pnlUsdc: number;
     pnlR: number;
-    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH';
+    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH' | 'TIME_STOP';
     feesUsdc: number;
     slippageUsdc: number;
     mfe: number;

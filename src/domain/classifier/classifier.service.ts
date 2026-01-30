@@ -5,6 +5,7 @@ import { Logger, ILogger } from '../../infra/logger/logger';
 import { EventBus } from '../../infra/event-bus/event-bus';
 import { ForcedEvent } from '../detectors/detector.types';
 import { FeatureBuilder } from '../features/features.service';
+import { DataIntegrityGuard } from '../data-integrity/data-integrity.service';
 import {
   setupEventHandlers,
   EventHandler,
@@ -33,6 +34,8 @@ export class SignalClassifier {
     @inject(TOKENS.LOGGER) logger: Logger,
     @inject(TOKENS.EVENT_BUS) private eventBus: EventBus,
     @inject(TOKENS.FEATURE_BUILDER) private featureBuilder: FeatureBuilder,
+    @inject(TOKENS.DATA_INTEGRITY_GUARD)
+    private dataIntegrity: DataIntegrityGuard,
   ) {
     this.logger = logger.child(SignalClassifier.name);
     setupEventHandlers(this);
@@ -55,6 +58,20 @@ export class SignalClassifier {
     const { snapshot } = event;
     const reasons: string[] = [];
 
+    // ==================== DATA INTEGRITY CHECK (MUST PASS) ====================
+    const dataCheck = this.dataIntegrity.canTrade(event.symbol);
+    if (!dataCheck.allowed) {
+      reasons.push(`data_integrity:${dataCheck.reason}`);
+      this.recordRejection(reasons);
+
+      this.logger.warn('❌ Signal REJECTED - data integrity failed', {
+        symbol: event.symbol,
+        reason: dataCheck.reason,
+      });
+
+      return { passed: false, reason: reasons.join(',') };
+    }
+
     // ==================== Filter Rules ====================
     // Philosophy: Better to not trade than to trade noise
 
@@ -65,7 +82,6 @@ export class SignalClassifier {
 
     // 2. Spread check - don't trade on wide spreads
     if (snapshot.spreadPct > 0.002) {
-      // > 0.2% spread
       reasons.push('spread_too_wide');
     }
 
@@ -74,12 +90,17 @@ export class SignalClassifier {
       reasons.push('return_too_small');
     }
 
-    // 4. Volatility check - should be elevated but not extreme
-    // Skip for now as we don't have 24h percentile baselines yet
+    // 4. Volatility check - use adaptive threshold
+    // Get current baselines for context
+    const baselines = this.featureBuilder.getBaselines(event.symbol);
+    if (baselines && baselines.p90Rv30s24h > 0) {
+      // If current rv is way above p90, market might be too chaotic
+      if (snapshot.rv30s > baselines.p90Rv30s24h * 2) {
+        reasons.push('volatility_extreme');
+      }
+    }
 
     // 5. CVD divergence check - CVD should align with impulse direction
-    // For DOWN impulse, CVD should be negative (selling pressure)
-    // For UP impulse, CVD should be positive (buying pressure)
     const cvdAligned =
       (event.sideHint === 'DOWN' && snapshot.cvd30s < 0) ||
       (event.sideHint === 'UP' && snapshot.cvd30s > 0);
@@ -87,13 +108,16 @@ export class SignalClassifier {
       reasons.push('cvd_not_aligned');
     }
 
-    // 6. Sufficient liquidity in book for exit
-    // We need book to be reasonably populated
-    // Skip for now
-
-    // 7. Liquidation count check - true cascades usually have multiple liquidations
+    // 6. Liquidation count check - true cascades usually have multiple liquidations
     if (snapshot.liqCount30s < 3) {
       reasons.push('liq_count_too_low');
+    }
+
+    // 7. Book depth check - need sufficient liquidity
+    // This is now handled by DataIntegrityGuard, but we can add extra check
+    if (snapshot.spreadPct > 0.0015 && snapshot.rv30s > 0.002) {
+      // Wide spread + high vol = dangerous
+      reasons.push('market_quality_poor');
     }
 
     // ==================== Pass/Fail Decision ====================
@@ -105,6 +129,8 @@ export class SignalClassifier {
         symbol: event.symbol,
         type: event.type,
         severity: event.severity.toFixed(2),
+        ret30s: (snapshot.ret30s * 100).toFixed(2) + '%',
+        liqNotional: (snapshot.liqNotional30s / 1_000_000).toFixed(1) + 'M',
       });
 
       return {
@@ -112,26 +138,27 @@ export class SignalClassifier {
         score: event.severity,
       };
     } else {
-      this.stats.rejected++;
-
-      // Track rejection reasons
-      for (const reason of reasons) {
-        const count = this.stats.rejectionReasons.get(reason) || 0;
-        this.stats.rejectionReasons.set(reason, count + 1);
-      }
-
-      const reason = reasons.join(',');
+      this.recordRejection(reasons);
 
       this.logger.debug('❌ Signal REJECTED', {
         symbol: event.symbol,
         type: event.type,
         reasons,
+        severity: event.severity.toFixed(2),
       });
 
       return {
         passed: false,
-        reason,
+        reason: reasons.join(','),
       };
+    }
+  }
+
+  private recordRejection(reasons: string[]): void {
+    this.stats.rejected++;
+    for (const reason of reasons) {
+      const count = this.stats.rejectionReasons.get(reason) || 0;
+      this.stats.rejectionReasons.set(reason, count + 1);
     }
   }
 

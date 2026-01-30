@@ -224,7 +224,7 @@ export class JournalService {
     qty: number;
     pnlUsdc: number;
     pnlR: number;
-    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH';
+    reason: 'TP' | 'SL' | 'MANUAL' | 'KILL_SWITCH' | 'TIME_STOP';
     feesUsdc: number;
     slippageUsdc: number;
     mfe: number;
