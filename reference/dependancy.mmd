@@ -1,0 +1,68 @@
+flowchart TB
+  subgraph App["Application"]
+    IDX["index.ts / AppBootstrap\n(точка входа, DI, запуск циклов)"]
+    CFG["ConfigService\n(parse env, validate)"]
+    LOG["MonitoringService\n(Telegram/Logs)"]
+    LED["LedgerService\n(PnL, fees, trades)"]
+    STORE["StateStore\n(activeTokenId, ops, steps)"]
+  end
+
+  subgraph Core["Core Runtime"]
+    ORCH["ExecutionOrchestrator\n(run loop, execute plans, resume ops)"]
+    STRAT["StrategyEngine\n(buildActionPlan)"]
+    RISK["RiskManager\n(evaluate, gates, emergency)"]
+    PRICE["PriceService\n(reference price, sanity checks)"]
+  end
+
+  subgraph Onchain["On-chain (Arbitrum)"]
+    TX["TxPolicyService\n(sendTx, waitReceipt,\nnonce/gas policy)"]
+    WAL["WalletService\n(balances, allowances,\nrebalanceTo50/50 swap)"]
+    LP["LpPositionService\n(read position, decrease/collect,\nmint new NFT, composition)"]
+    RPC["RPC Provider(s)\n(WS/HTTP)"]
+    UNI["Uniswap V3 Pool + PositionManager\n(WETH/USDC 0.05%)"]
+  end
+
+  subgraph CEX["Off-chain (Binance)"]
+    HEDGE["HedgeService\n(getPosition, setTargetShort,\nreduce-only close, margin info)"]
+    BIN["Binance API/WS\n(perps ETHUSDT)"]
+  end
+
+  %% Bootstrap dependencies
+  IDX --> CFG
+  IDX --> STORE
+  IDX --> ORCH
+  IDX --> LOG
+
+  %% Orchestrator calls
+  ORCH --> STRAT
+  ORCH --> RISK
+  ORCH --> STORE
+  ORCH --> LED
+  ORCH --> LOG
+
+  %% Strategy / risk inputs
+  STRAT --> PRICE
+  STRAT --> LP
+  STRAT --> HEDGE
+  RISK --> PRICE
+  RISK --> HEDGE
+  RISK --> LP
+  RISK --> STORE
+
+  %% Execution primitives
+  ORCH --> WAL
+  ORCH --> LP
+  ORCH --> HEDGE
+  ORCH --> TX
+
+  %% On-chain wiring
+  PRICE --> RPC
+  WAL --> TX
+  LP --> TX
+  TX --> RPC
+  RPC --> UNI
+  WAL --> UNI
+  LP --> UNI
+
+  %% CEX wiring
+  HEDGE --> BIN

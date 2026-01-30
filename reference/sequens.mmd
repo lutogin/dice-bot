@@ -1,0 +1,127 @@
+sequenceDiagram
+  autonumber
+
+  participant IDX as index.ts
+  participant APP as app.ts
+  participant CFG as ConfigService
+  participant DB as MongoClient
+  participant SCHED as SchedulerService
+  participant LOOP as MainLoop
+  participant STORE as StateStore
+  participant PRICE as PriceService
+  participant LP as LpPositionService
+  participant HEDGE as HedgeService
+  participant RISK as RiskManager
+  participant STRAT as StrategyEngine
+  participant ORCH as ExecutionOrchestrator
+  participant WAL as WalletService
+  participant TX as TxPolicyService
+  participant LED as LedgerService
+  participant MON as MonitoringService
+
+  %% =====================
+  %% Bootstrap
+  %% =====================
+  IDX->>CFG: load env + validate
+  IDX->>APP: App.run()
+
+  APP->>DB: connect()
+  APP->>SCHED: start cron jobs
+  APP->>STORE: init state
+  APP->>LOOP: start()
+
+  %% =====================
+  %% Cron jobs (non-trading)
+  %% =====================
+  SCHED->>PRICE: health check
+  SCHED->>HEDGE: ping / funding snapshot
+  SCHED->>STORE: position sync
+  SCHED->>MON: alerts if unhealthy
+
+  %% =====================
+  %% Main decision loop
+  %% =====================
+  loop every loopIntervalSec
+    LOOP->>STORE: getInFlightOp()
+
+    alt inFlight exists
+      LOOP->>ORCH: resumeResetRange(op)
+    else no inFlight
+      LOOP->>PRICE: getReferencePrice()
+      LOOP->>STORE: getActiveTokenId()
+      LOOP->>LP: setTokenId(activeTokenId)
+      LOOP->>LP: getComposition(price)
+      LOOP->>HEDGE: getPosition()
+      LOOP->>RISK: evaluate(price, lp, hedge)
+
+      alt risk blocks
+        LOOP->>MON: warn / critical
+        LOOP->>LED: record snapshot
+      else risk ok
+        LOOP->>STRAT: buildActionPlan()
+
+        alt plan == RESET_RANGE
+          LOOP->>ORCH: executeResetRange(plan)
+        else plan == REHEDGE
+          LOOP->>ORCH: executeRehedge(plan)
+        else plan == NONE
+          LOOP->>LED: heartbeat
+        end
+      end
+    end
+  end
+
+  %% =====================
+  %% RESET RANGE RUNBOOK
+  %% =====================
+  rect rgb(245,245,245)
+    ORCH->>RISK: setOperationInProgress(true)
+    ORCH->>STORE: beginOp(RESET_RANGE)
+
+    ORCH->>STORE: step PREFLIGHT
+    ORCH->>PRICE: getReferencePrice()
+    ORCH->>LP: getComposition()
+    ORCH->>HEDGE: getPosition()
+    ORCH->>RISK: canExecuteReset()
+
+    ORCH->>STORE: step HEDGE_SAFETY
+    ORCH->>HEDGE: reduce short if needed
+
+    ORCH->>STORE: step DECREASE_SENT
+    ORCH->>LP: decreaseLiquidity()
+    ORCH->>TX: waitConfirmed()
+
+    ORCH->>STORE: step COLLECT_SENT
+    ORCH->>LP: collectFees()
+    ORCH->>TX: waitConfirmed()
+
+    ORCH->>STORE: step BALANCES_SNAPSHOT
+    ORCH->>WAL: getBalances()
+
+    ORCH->>STORE: step SWAP
+    ORCH->>WAL: rebalanceTo50_50()
+    ORCH->>TX: waitConfirmed()
+
+    ORCH->>STORE: step ALLOWANCES
+    ORCH->>WAL: ensureAllowance()
+    ORCH->>TX: waitConfirmed()
+
+    ORCH->>STORE: step MINT
+    ORCH->>LP: mintNewPosition()
+    ORCH->>TX: waitConfirmed()
+    ORCH->>LP: setTokenId(newTokenId)
+
+    ORCH->>STORE: step HEDGE_AFTER_RESET
+    ORCH->>LP: getComposition()
+    ORCH->>STRAT: computeHedgeTarget()
+    ORCH->>HEDGE: setTargetShort()
+
+    ORCH->>STORE: step LEDGER
+    ORCH->>LED: recordTick()
+
+    ORCH->>STORE: step DONE
+    ORCH->>STORE: setActiveTokenId(newTokenId)
+    ORCH->>STORE: completeOp()
+
+    ORCH->>RISK: setOperationInProgress(false)
+  end

@@ -1,0 +1,73 @@
+{
+  "name": "ffe-trading-bot",
+  "version": "1.0.0",
+  "description": "Forced Flow Exploitation Trading Bot - Detects liquidation cascades and trades on second breath",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "start": "node dist/index.js",
+    "dev": "ts-node -r tsconfig-paths/register src/index.ts",
+    "dev:watch": "nodemon --exec ts-node -r tsconfig-paths/register src/index.ts",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "trading",
+    "crypto",
+    "bot",
+    "liquidations",
+    "forced-flow"
+  ],
+  "author": "@lutogin",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "binance": "^3.1.5",
+    "dayjs": "^1.11.19",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.2.3",
+    "eventemitter3": "^5.0.1",
+    "ioredis": "^5.4.1",
+    "joi": "^18.0.2",
+    "lodash": "^4.17.21",
+    "mongodb": "^6.12.0",
+    "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "reflect-metadata": "^0.2.2",
+    "tsyringe": "^4.10.0",
+    "uuid": "^11.1.0",
+    "winston": "^3.18.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/lodash": "^4.17.21",
+    "@types/node": "^24.10.1",
+    "@types/node-cron": "^3.0.11",
+    "@types/node-telegram-bot-api": "^0.64.13",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "globals": "^17.2.0",
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.11",
+    "prettier": "^3.7.3",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "tsc-alias": "^1.8.16",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

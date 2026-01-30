@@ -1,0 +1,46 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Logs
+logs
+*.log
+
+# Environment files (secrets!)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Tests
+**/*.test.ts
+**/*.spec.ts
+coverage
+jest.config.*
+
+# Documentation
+*.md
+!README.md
+
+# Reference project
+reference
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
