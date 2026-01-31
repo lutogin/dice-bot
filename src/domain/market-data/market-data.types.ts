@@ -22,6 +22,7 @@ export interface OrderBookSnap {
   midPrice: number;
   spread: number;
   spreadPct: number;
+  updateId?: number;
 }
 
 /**

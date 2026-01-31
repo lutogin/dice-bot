@@ -171,6 +171,7 @@ export class MarketDataService {
           state.openInterest = oi;
           state.updatedAt = oi.ts;
         }
+        this.eventBus.emit('market.oi.updated', { symbol, ts: oi.ts });
       } catch (error) {
         this.logger.error(`Failed to fetch OI for ${symbol}`, error as Error);
       }
@@ -201,6 +202,10 @@ export class MarketDataService {
           state.fundingRate = funding;
           state.updatedAt = funding.ts;
         }
+        this.eventBus.emit('market.funding.updated', {
+          symbol,
+          ts: funding.ts,
+        });
       } catch (error) {
         this.logger.error(
           `Failed to fetch funding for ${symbol}`,

@@ -24,6 +24,9 @@ export interface DataHealth {
   spreadPct: number;
   topBookDepth: number;
   tradeCount10s: number;
+  tickLatencyMs: number;
+  bookUpdateId: number;
+  bookSeqGap: number;
 }
 
 interface SymbolState {
@@ -37,6 +40,13 @@ interface SymbolState {
   lastTopBidDepth: number;
   lastTopAskDepth: number;
   tickTimestamps: number[];
+  lastTickLatencyMs: number;
+  lastBookUpdateId: number;
+  lastBookSeqGap: number;
+  lastBookSeqNonMonotonic: boolean;
+  depthThinStreak: number;
+  depthOkStreak: number;
+  depthThinActive: boolean;
 }
 
 /**
@@ -57,6 +67,8 @@ export class DataIntegrityGuard {
   private globalHealthy = true;
   private checkIntervalId: NodeJS.Timeout | null = null;
   private startedAt = 0;
+  private readonly DEPTH_THIN_CONFIRM_COUNT = 3;
+  private readonly DEPTH_THIN_CLEAR_COUNT = 2;
 
   constructor(
     @inject(TOKENS.CONFIG_SERVICE) private config: ConfigService,
@@ -84,6 +96,9 @@ export class DataIntegrityGuard {
       gracePeriodSec: this.config.dataIntegrity.startupGracePeriodMs / 1000,
       maxTickGapMs: this.config.dataIntegrity.maxTickGapMs,
       maxBookGapMs: this.config.dataIntegrity.maxBookGapMs,
+      maxTickLatencyMs: this.config.dataIntegrity.maxTickLatencyMs,
+      maxFundingAgeMs: this.config.dataIntegrity.maxFundingAgeMs,
+      maxBookSeqGap: this.config.dataIntegrity.maxBookSeqGap,
       maxSpreadPct:
         (this.config.dataIntegrity.maxSpreadPct * 100).toFixed(2) + '%',
       minTopDepthUsd: this.config.dataIntegrity.minTopDepthUsd,
@@ -110,6 +125,13 @@ export class DataIntegrityGuard {
       lastTopBidDepth: 0,
       lastTopAskDepth: 0,
       tickTimestamps: [],
+      lastTickLatencyMs: 0,
+      lastBookUpdateId: 0,
+      lastBookSeqGap: 0,
+      lastBookSeqNonMonotonic: false,
+      depthThinStreak: 0,
+      depthOkStreak: 0,
+      depthThinActive: false,
     };
   }
 
@@ -120,6 +142,7 @@ export class DataIntegrityGuard {
 
     const now = Date.now();
     state.lastTickTs = now;
+    state.lastTickLatencyMs = Math.max(0, now - tick.ts);
     state.tickTimestamps.push(now);
 
     const cutoff = now - 10000;
@@ -141,9 +164,40 @@ export class DataIntegrityGuard {
     state.lastTopAskDepth = book.asks
       .slice(0, 5)
       .reduce((sum, [px, qty]) => sum + px * qty, 0);
+
+    if (typeof book.updateId === 'number') {
+      if (state.lastBookUpdateId > 0) {
+        if (book.updateId <= state.lastBookUpdateId) {
+          state.lastBookSeqNonMonotonic = true;
+          state.lastBookSeqGap = 0;
+        } else {
+          state.lastBookSeqNonMonotonic = false;
+          state.lastBookSeqGap = book.updateId - state.lastBookUpdateId - 1;
+        }
+      }
+      state.lastBookUpdateId = book.updateId;
+    }
   }
 
-  onWsReconnect(symbol: string): void {
+  @EventHandler('ws.reconnect')
+  onWsReconnectEvent(data: {
+    scope: 'all' | 'symbol';
+    symbol?: string;
+    stage: 'reconnecting' | 'reconnected';
+  }): void {
+    if (data.stage !== 'reconnecting') return;
+    if (data.scope === 'all') {
+      for (const symbol of this.config.symbols) {
+        this.onWsReconnect(symbol);
+      }
+      return;
+    }
+    if (data.symbol) {
+      this.onWsReconnect(data.symbol);
+    }
+  }
+
+  private onWsReconnect(symbol: string): void {
     const state = this.symbolStates.get(symbol);
     if (!state) return;
 
@@ -164,17 +218,27 @@ export class DataIntegrityGuard {
     );
   }
 
-  onOiUpdate(symbol: string): void {
+  @EventHandler('market.oi.updated')
+  onOiUpdated(data: { symbol: string; ts: number }): void {
+    this.recordOiUpdate(data.symbol, data.ts);
+  }
+
+  private recordOiUpdate(symbol: string, ts?: number): void {
     const state = this.symbolStates.get(symbol);
     if (state) {
-      state.lastOiTs = Date.now();
+      state.lastOiTs = ts || Date.now();
     }
   }
 
-  onFundingUpdate(symbol: string): void {
+  @EventHandler('market.funding.updated')
+  onFundingUpdated(data: { symbol: string; ts: number }): void {
+    this.recordFundingUpdate(data.symbol, data.ts);
+  }
+
+  private recordFundingUpdate(symbol: string, ts?: number): void {
     const state = this.symbolStates.get(symbol);
     if (state) {
-      state.lastFundingTs = Date.now();
+      state.lastFundingTs = ts || Date.now();
     }
   }
 
@@ -237,6 +301,9 @@ export class DataIntegrityGuard {
         spreadPct: 0,
         topBookDepth: 0,
         tradeCount10s: 0,
+        tickLatencyMs: 0,
+        bookUpdateId: 0,
+        bookSeqGap: 0,
       };
     }
 
@@ -263,10 +330,28 @@ export class DataIntegrityGuard {
       reasons.push(`spread_wide_${(state.lastSpreadPct * 100).toFixed(2)}%`);
     }
 
-    // Check book depth
+    // Check book depth with hysteresis to avoid flapping
     const minDepth = Math.min(state.lastTopBidDepth, state.lastTopAskDepth);
-    if (state.lastBookTs > 0 && minDepth < cfg.minTopDepthUsd) {
-      reasons.push(`depth_thin_${Math.round(minDepth)}`);
+    if (state.lastBookTs > 0) {
+      const isThin = minDepth < cfg.minTopDepthUsd;
+
+      if (isThin) {
+        state.depthThinStreak += 1;
+        state.depthOkStreak = 0;
+        if (state.depthThinStreak >= this.DEPTH_THIN_CONFIRM_COUNT) {
+          state.depthThinActive = true;
+        }
+      } else {
+        state.depthOkStreak += 1;
+        state.depthThinStreak = 0;
+        if (state.depthOkStreak >= this.DEPTH_THIN_CLEAR_COUNT) {
+          state.depthThinActive = false;
+        }
+      }
+
+      if (state.depthThinActive) {
+        reasons.push(`depth_thin_${Math.round(minDepth)}`);
+      }
     }
 
     // Check trade flow (only after grace period)
@@ -278,6 +363,15 @@ export class DataIntegrityGuard {
       reasons.push(`low_flow_${state.tickCount10s}_trades`);
     }
 
+    // Check tick latency
+    if (
+      !inGracePeriod &&
+      state.lastTickTs > 0 &&
+      state.lastTickLatencyMs > cfg.maxTickLatencyMs
+    ) {
+      reasons.push(`tick_latency_${state.lastTickLatencyMs}ms`);
+    }
+
     // Check WS reconnects
     if (state.wsReconnectCount >= cfg.maxReconnects5min) {
       reasons.push(`ws_unstable_${state.wsReconnectCount}_reconnects`);
@@ -286,6 +380,23 @@ export class DataIntegrityGuard {
     // Check OI freshness
     if (state.lastOiTs > 0 && now - state.lastOiTs > cfg.maxOiAgeMs) {
       reasons.push(`oi_stale_${Math.round((now - state.lastOiTs) / 60000)}min`);
+    }
+
+    // Check funding freshness
+    if (
+      state.lastFundingTs > 0 &&
+      now - state.lastFundingTs > cfg.maxFundingAgeMs
+    ) {
+      reasons.push(
+        `funding_stale_${Math.round((now - state.lastFundingTs) / 60000)}min`,
+      );
+    }
+
+    // Check orderbook sequence gaps (if updateId available)
+    if (state.lastBookSeqNonMonotonic) {
+      reasons.push('book_seq_non_monotonic');
+    } else if (state.lastBookSeqGap > cfg.maxBookSeqGap) {
+      reasons.push(`book_seq_gap_${state.lastBookSeqGap}`);
     }
 
     return {
@@ -300,6 +411,9 @@ export class DataIntegrityGuard {
       spreadPct: state.lastSpreadPct,
       topBookDepth: minDepth,
       tradeCount10s: state.tickCount10s,
+      tickLatencyMs: state.lastTickLatencyMs,
+      bookUpdateId: state.lastBookUpdateId,
+      bookSeqGap: state.lastBookSeqGap,
     };
   }
 

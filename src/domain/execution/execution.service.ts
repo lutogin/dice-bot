@@ -47,6 +47,15 @@ const TIME_STOP_CONFIG = {
   NO_FOLLOW_THROUGH_MIN_MFE: 0.15, // Need 0.15R within first 60 sec
 };
 
+// Aggressive limit entry settings (maker-first, fallback to market)
+const ENTRY_EXECUTION_CONFIG = {
+  maxRetries: 2,
+  retryIntervalMs: 300,
+  fallbackToMarket: true,
+  maxSlippagePct: 0.15,
+  priceImprovementPct: 0.01,
+};
+
 @injectable()
 export class ExecutionEngine {
   private readonly logger: ILogger;
@@ -439,13 +448,14 @@ export class ExecutionEngine {
         });
       } else {
         // LIVE MODE - real orders
-        const result = await this.binance.createMarketOrder(
+        const result = await this.binance.createAggressiveLimitOrder(
           plan.symbol,
           orderSide,
           plan.qty,
+          ENTRY_EXECUTION_CONFIG,
         );
 
-        if (!result.orderId || result.filledQty === 0) {
+        if (result.filledQty === 0) {
           this.logger.error('Entry order failed', null, { planId: plan.id });
           return;
         }
@@ -479,6 +489,7 @@ export class ExecutionEngine {
           side: plan.side,
           fillPrice: entryPrice.toFixed(2),
           qty: filledQty.toFixed(4),
+          marketFallback: result.usedMarketFallback,
         });
       }
 

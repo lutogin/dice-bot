@@ -90,11 +90,14 @@ export interface FFEConfig {
   dataIntegrity: {
     maxTickGapMs: number; // Max time without tick before stale
     maxBookGapMs: number; // Max time without book update before stale
+    maxTickLatencyMs: number; // Max allowed tick latency (exchange -> local)
     maxOiAgeMs: number; // Max OI data age
+    maxFundingAgeMs: number; // Max funding data age
     maxSpreadPct: number; // Max spread before unhealthy
     minTopDepthUsd: number; // Min depth on each side
     minTrades10s: number; // Min trades per 10s
     maxReconnects5min: number; // Max WS reconnects per 5 min
+    maxBookSeqGap: number; // Max gap in book update ids
     startupGracePeriodMs: number; // Grace period on startup
   };
 }
@@ -177,11 +180,14 @@ const configSchema = Joi.object({
   dataIntegrity: Joi.object({
     maxTickGapMs: Joi.number().default(5000), // 5 sec
     maxBookGapMs: Joi.number().default(3000), // 3 sec
+    maxTickLatencyMs: Joi.number().default(2000), // 2 sec
     maxOiAgeMs: Joi.number().default(300000), // 5 min
+    maxFundingAgeMs: Joi.number().default(600000), // 10 min
     maxSpreadPct: Joi.number().default(0.003), // 0.3%
-    minTopDepthUsd: Joi.number().default(10000), // $10k
+    minTopDepthUsd: Joi.number().default(10000), // $10k across all levels
     minTrades10s: Joi.number().default(5), // 5 trades
     maxReconnects5min: Joi.number().default(3), // 3 reconnects
+    maxBookSeqGap: Joi.number().default(50000),
     startupGracePeriodMs: Joi.number().default(30000), // 30 sec
   }),
 });
@@ -329,8 +335,16 @@ export class ConfigService implements FFEConfig {
           process.env['FFE_DI_MAX_BOOK_GAP_MS'] || '3000',
           10,
         ),
+        maxTickLatencyMs: parseInt(
+          process.env['FFE_DI_MAX_TICK_LATENCY_MS'] || '2000',
+          10,
+        ),
         maxOiAgeMs: parseInt(
           process.env['FFE_DI_MAX_OI_AGE_MS'] || '300000',
+          10,
+        ),
+        maxFundingAgeMs: parseInt(
+          process.env['FFE_DI_MAX_FUNDING_AGE_MS'] || '600000',
           10,
         ),
         maxSpreadPct: parseFloat(
@@ -342,6 +356,10 @@ export class ConfigService implements FFEConfig {
         minTrades10s: parseInt(process.env['FFE_DI_MIN_TRADES_10S'] || '5', 10),
         maxReconnects5min: parseInt(
           process.env['FFE_DI_MAX_RECONNECTS_5MIN'] || '3',
+          10,
+        ),
+        maxBookSeqGap: parseInt(
+          process.env['FFE_DI_MAX_BOOK_SEQ_GAP'] || '50000',
           10,
         ),
         startupGracePeriodMs: parseInt(

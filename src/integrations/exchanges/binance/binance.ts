@@ -264,6 +264,200 @@ export class BinanceClient {
     return new Decimal((bid + ask) / 2);
   }
 
+  private async getBestBidAsk(symbol: string): Promise<{
+    bid: number;
+    ask: number;
+  }> {
+    const binanceSymbol = this.symbolToBinance(symbol);
+
+    const ticker = await RetryUtils.retry(
+      () => this.restClient.getSymbolOrderBookTicker({ symbol: binanceSymbol }),
+      { maxRetries: 2, baseDelay: 300 },
+    );
+
+    return {
+      bid: parseFloat(ticker.bidPrice.toString()),
+      ask: parseFloat(ticker.askPrice.toString()),
+    };
+  }
+
+  async getOrder(
+    symbol: string,
+    orderId: string,
+  ): Promise<{
+    status: string;
+    avgPrice: number;
+    filledQty: number;
+    price: number;
+  }> {
+    const binanceSymbol = this.symbolToBinance(symbol);
+
+    const order = await RetryUtils.retry(
+      () =>
+        this.restClient.getOrder({
+          symbol: binanceSymbol,
+          orderId: parseInt(orderId, 10),
+        }),
+      { maxRetries: 2, baseDelay: 200 },
+    );
+
+    return {
+      status: order.status?.toString() || 'UNKNOWN',
+      avgPrice: parseFloat(order.avgPrice?.toString() || '0'),
+      filledQty: parseFloat(order.executedQty?.toString() || '0'),
+      price: parseFloat(order.price?.toString() || '0'),
+    };
+  }
+
+  /**
+   * Aggressive limit entry with retries and optional market fallback.
+   */
+  async createAggressiveLimitOrder(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    options: {
+      maxRetries?: number;
+      retryIntervalMs?: number;
+      fallbackToMarket?: boolean;
+      maxSlippagePct?: number;
+      priceImprovementPct?: number;
+    } = {},
+  ): Promise<{
+    avgPrice: number;
+    filledQty: number;
+    fees: number;
+    usedMarketFallback: boolean;
+  }> {
+    const {
+      maxRetries = 2,
+      retryIntervalMs = 300,
+      fallbackToMarket = true,
+      maxSlippagePct = 0.15,
+      priceImprovementPct = 0.01,
+    } = options;
+
+    const initialBook = await this.getBestBidAsk(symbol);
+    const initialPrice = side === 'BUY' ? initialBook.ask : initialBook.bid;
+
+    let remainingQty = quantity;
+    let totalFilled = 0;
+    let totalCost = 0;
+    let totalFees = 0;
+    let usedMarketFallback = false;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (remainingQty <= 0) break;
+
+      const book = await this.getBestBidAsk(symbol);
+      let limitPrice: number;
+
+      if (side === 'BUY') {
+        limitPrice = book.bid * (1 + priceImprovementPct / 100);
+        limitPrice = Math.min(limitPrice, book.ask * 0.9999);
+      } else {
+        limitPrice = book.ask * (1 - priceImprovementPct / 100);
+        limitPrice = Math.max(limitPrice, book.bid * 1.0001);
+      }
+
+      const worstAcceptable =
+        side === 'BUY'
+          ? initialPrice * (1 + maxSlippagePct / 100)
+          : initialPrice * (1 - maxSlippagePct / 100);
+      const slippageExceeded =
+        side === 'BUY'
+          ? limitPrice > worstAcceptable
+          : limitPrice < worstAcceptable;
+
+      if (slippageExceeded) {
+        this.logger.warn('Aggressive limit slippage exceeded', {
+          symbol,
+          side,
+          limitPrice: limitPrice.toFixed(4),
+          initialPrice: initialPrice.toFixed(4),
+          maxSlippagePct,
+          fallbackToMarket,
+        });
+
+        if (fallbackToMarket) {
+          break;
+        }
+        throw new Error(
+          `Aggressive limit slippage exceeded ${maxSlippagePct}%`,
+        );
+      }
+
+      const order = await this.restClient.submitNewOrder({
+        symbol: this.symbolToBinance(symbol),
+        side,
+        type: 'LIMIT',
+        quantity: remainingQty,
+        price: limitPrice,
+        timeInForce: 'GTC',
+      });
+
+      const orderId = order.orderId?.toString();
+      if (!orderId) {
+        throw new Error('Limit order missing orderId');
+      }
+
+      await RetryUtils.sleep(retryIntervalMs);
+
+      const status = await this.getOrder(symbol, orderId);
+      const filledQty = status.filledQty;
+      const fillPrice =
+        status.avgPrice > 0 ? status.avgPrice : status.price || limitPrice;
+
+      if (filledQty > 0) {
+        totalFilled += filledQty;
+        totalCost += fillPrice * filledQty;
+        remainingQty = Math.max(0, remainingQty - filledQty);
+      }
+
+      if (status.status === 'FILLED') {
+        break;
+      }
+
+      try {
+        await this.cancelOrder(symbol, orderId);
+      } catch (error) {
+        this.logger.debug('Failed to cancel stale limit order', {
+          symbol,
+          orderId,
+          error: (error as Error).message,
+        });
+      }
+    }
+
+    if (remainingQty > 0) {
+      if (!fallbackToMarket) {
+        throw new Error(
+          'Aggressive limit not filled and market fallback disabled',
+        );
+      }
+
+      usedMarketFallback = true;
+      const marketRes = await this.createMarketOrder(
+        symbol,
+        side,
+        remainingQty,
+      );
+      totalFilled += marketRes.filledQty;
+      totalCost += marketRes.avgPrice * marketRes.filledQty;
+      totalFees += marketRes.fees;
+      remainingQty = 0;
+    }
+
+    const avgPrice = totalFilled > 0 ? totalCost / totalFilled : 0;
+
+    return {
+      avgPrice,
+      filledQty: totalFilled,
+      fees: totalFees,
+      usedMarketFallback,
+    };
+  }
+
   async getOrderBook(
     symbol: string,
     limit: number = 20,
@@ -389,10 +583,22 @@ export class BinanceClient {
 
     this.wsClient.on('reconnecting', (data) => {
       this.logger.warn('WebSocket reconnecting', { wsKey: data?.wsKey });
+      this.eventBus.emit('ws.reconnect', {
+        scope: 'all',
+        stage: 'reconnecting',
+        wsKey: data?.wsKey,
+        timestamp: Date.now(),
+      });
     });
 
     this.wsClient.on('reconnected', (data) => {
       this.logger.info('WebSocket reconnected', { wsKey: data?.wsKey });
+      this.eventBus.emit('ws.reconnect', {
+        scope: 'all',
+        stage: 'reconnected',
+        wsKey: data?.wsKey,
+        timestamp: Date.now(),
+      });
     });
 
     (this.wsClient as any).on('error', (error: any) => {
@@ -509,8 +715,56 @@ export class BinanceClient {
   }
 
   private handleDepthUpdate(data: BinanceDepthUpdate): void {
-    // Incremental depth update - for now we skip and rely on partial book
-    // Could be implemented for more granular tracking
+    // With beautify:true, partial depth comes as bidDepthDelta/askDepthDelta
+    // with objects {price, quantity} instead of arrays [price, qty]
+    const bidDepthDelta = (data as any).bidDepthDelta;
+    const askDepthDelta = (data as any).askDepthDelta;
+
+    if (Array.isArray(bidDepthDelta) && Array.isArray(askDepthDelta)) {
+      // Beautified format: [{price, quantity}, ...]
+      const binanceSymbol = (data as any).symbol || data.s;
+      if (!binanceSymbol) {
+        this.logger.debug('DepthUpdate missing symbol', { data });
+        return;
+      }
+
+      const symbol = this.symbolFromBinance(binanceSymbol);
+      const callbacks = this.bookCallbacks.get(symbol);
+      if (!callbacks || callbacks.length === 0) return;
+
+      // Convert from {price, quantity} objects to [price, qty] arrays
+      const bids: [number, number][] = bidDepthDelta.map((b: any) => [
+        Number(b.price),
+        Number(b.quantity),
+      ]);
+      const asks: [number, number][] = askDepthDelta.map((a: any) => [
+        Number(a.price),
+        Number(a.quantity),
+      ]);
+
+      const bestBid = bids[0]?.[0] || 0;
+      const bestAsk = asks[0]?.[0] || 0;
+      const midPrice = (bestBid + bestAsk) / 2;
+      const spread = bestAsk - bestBid;
+
+      const book: OrderBookSnap = {
+        ts: Date.now(),
+        symbol,
+        bids,
+        asks,
+        midPrice,
+        spread,
+        spreadPct: midPrice > 0 ? spread / midPrice : 0,
+        updateId: (data as any).lastUpdateId,
+      };
+
+      callbacks.forEach((cb) => cb(book));
+      this.eventBus.emit('book.snapshot', book);
+      return;
+    }
+
+    // Fallback: raw format with bids/asks as arrays
+    this.handlePartialBook(data);
   }
 
   private handlePartialBook(data: any): void {
@@ -537,6 +791,9 @@ export class BinanceClient {
     const midPrice = (bestBid + bestAsk) / 2;
     const spread = bestAsk - bestBid;
 
+    const rawUpdateId = data.lastUpdateId || data.u;
+    const parsedUpdateId =
+      rawUpdateId !== undefined ? Number(rawUpdateId) : undefined;
     const book: OrderBookSnap = {
       ts: Date.now(),
       symbol,
@@ -545,6 +802,7 @@ export class BinanceClient {
       midPrice,
       spread,
       spreadPct: midPrice > 0 ? spread / midPrice : 0,
+      updateId: Number.isFinite(parsedUpdateId) ? parsedUpdateId : undefined,
     };
 
     callbacks.forEach((cb) => cb(book));

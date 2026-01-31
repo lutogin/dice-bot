@@ -12,6 +12,21 @@ export interface EventMap {
   'tick.normalized': NormalizedTick;
   'book.snapshot': OrderBookSnap;
   'liq.print': LiqPrint;
+  'market.oi.updated': {
+    symbol: string;
+    ts: number;
+  };
+  'market.funding.updated': {
+    symbol: string;
+    ts: number;
+  };
+  'ws.reconnect': {
+    scope: 'all' | 'symbol';
+    symbol?: string;
+    stage: 'reconnecting' | 'reconnected';
+    wsKey?: string;
+    timestamp: number;
+  };
 
   // ==================== Features ====================
   'features.updated': {
