@@ -67,7 +67,7 @@ export class DataIntegrityGuard {
   private globalHealthy = true;
   private checkIntervalId: NodeJS.Timeout | null = null;
   private startedAt = 0;
-  private readonly DEPTH_THIN_CONFIRM_COUNT = 3;
+  private readonly DEPTH_THIN_CONFIRM_COUNT = 5;
   private readonly DEPTH_THIN_CLEAR_COUNT = 2;
 
   constructor(
